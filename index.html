@@ -183,12 +183,16 @@
       <button class="act pri" onclick="copyTxt()">📋 텍스트 복사</button>
       <button class="act kko" onclick="shareKakao()">💬 카카오톡 공유</button>
     </div>
+    <div class="btns">
+      <button class="act" onclick="copyLink()">🔗 기록 링크 복사 (백업·다른 기기로 옮기기)</button>
+    </div>
     <div class="hint">
       · 쿼터 점수는 <b>그 시점까지의 누적 점수</b>입니다. 4쿼터 칸에 적힌 값이 곧 최종 점수예요. (칸 아래 회색 숫자는 그 쿼터에 올린 점수)<br>
       · 팀은 <b>＋ 팀 추가</b>로 늘리고 이름 옆 <b>×</b>로 지울 수 있어요 (최소 2팀).<br>
       · 쿼터별 <b>공격권</b>은 버튼을 누를 때마다 <b>위 팀 → 아래 팀 → 미정</b>으로 바뀌고, <b>⇄</b>를 누르면 1쿼터 기준으로 번갈아 채워집니다.<br>
       · 한글 2칸·숫자 1칸으로 폭을 계산해 열을 맞췄습니다. 카톡 글꼴은 고정폭이 아니라 <b>간결형</b>도 준비했으니 채팅방에 붙여보고 고르세요.<br>
-      · 입력값은 주소(URL)에 자동 저장돼 새로고침해도 유지됩니다.
+      · 입력값은 이 브라우저에 자동 저장돼 새로고침하거나 나중에 다시 들어와도 그대로 있습니다. 주소창은 깨끗하게 유지돼요.<br>
+      · 다른 기기로 옮기거나 백업하려면 <b>🔗 기록 링크 복사</b>를 쓰세요. 그 링크를 열면 기록이 그대로 복원됩니다.
     </div>
   </div>
 </div>
@@ -231,20 +235,97 @@ function defaultState() {
   };
 }
 
-/* URL 해시 저장 (브라우저 저장소 미사용) */
+/* ---------------- 저장 ----------------
+   1순위: 브라우저 저장소(localStorage) → 주소창이 깨끗하게 유지됨
+   2순위: 저장소가 막힌 환경에서만 주소 해시(#)에 백업          */
+var LSKEY = 'bball.v1';
+var useHash = false;   /* 저장소를 못 쓰는 환경이면 true */
+
+/* ---- 짧은 코드로 압축/복원 ---- */
+function b64e(str){
+  var bytes = new TextEncoder().encode(str), bin = '';
+  for (var i=0;i<bytes.length;i+=0x8000)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i+0x8000));
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64d(s){
+  s = s.replace(/-/g,'+').replace(/_/g,'/');
+  while (s.length % 4) s += '=';
+  var bin = atob(s), bytes = new Uint8Array(bin.length);
+  for (var i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function nz(v){ return (v === null || v === undefined) ? -1 : v; }
+function un(v){ return v === -1 ? null : v; }
+function packState(s){
+  var teams = s.teams.map(function(t){
+    var pi = -1;
+    for (var i=0;i<PALETTE.length;i++) if (PALETTE[i].c === t.c) pi = i;
+    return [t.id, t.name, pi >= 0 ? pi : t.c];
+  });
+  var games = s.games.map(function(g){
+    return [g.a, g.b].concat(g.q[0].map(nz), g.q[1].map(nz), g.p.map(nz));
+  });
+  return b64e(JSON.stringify([1, s.date, s.title, teams, games]));
+}
+function unpackState(code){
+  var a = JSON.parse(b64d(code));
+  if (!a || a[0] !== 1) throw 0;
+  return {
+    date: a[1], title: a[2],
+    teams: a[3].map(function(t){
+      return { id:t[0], name:t[1], c: typeof t[2] === 'number' ? (PALETTE[t[2]]||PALETTE[0]).c : t[2] };
+    }),
+    games: a[4].map(function(g){
+      return { a:g[0], b:g[1],
+        q:[ g.slice(2,6).map(un), g.slice(6,10).map(un) ],
+        p: g.slice(10,14).map(un) };
+    })
+  };
+}
+/* 공유용 링크 (기록이 담긴 주소) */
+function shareUrl(){
+  return location.origin + location.pathname + location.search + '#d=' + packState(state);
+}
+
 function save() {
-  try {
-    var s = encodeURIComponent(JSON.stringify(state));
-    history.replaceState(null, '', location.pathname + location.search + '#' + s);
-  } catch(e) {}
+  if (!useHash){
+    try { localStorage.setItem(LSKEY, JSON.stringify(state)); return; }
+    catch(e){ useHash = true; }
+  }
+  try { history.replaceState(null, '', '#d=' + packState(state)); } catch(e) {}
+}
+function cleanUrl(){
+  try { history.replaceState(null, '', location.pathname + location.search); } catch(e) {}
 }
 function load() {
+  var h = location.hash.slice(1), fromLink = null;
+  /* 1) 주소에 기록이 실려 있으면 불러오기 */
+  if (h){
+    try {
+      fromLink = h.indexOf('d=') === 0 ? unpackState(h.slice(2))
+                                       : migrate(JSON.parse(decodeURIComponent(h)));
+    } catch(e){ fromLink = null; }
+  }
+  /* 2) 브라우저 저장소 확인 */
+  var saved = null;
   try {
-    if (location.hash.length > 1) {
-      var o = JSON.parse(decodeURIComponent(location.hash.slice(1)));
-      if (o && o.teams && o.games) return migrate(o);
+    localStorage.setItem(LSKEY + '.t', '1'); localStorage.removeItem(LSKEY + '.t');
+    var raw = localStorage.getItem(LSKEY);
+    if (raw) saved = migrate(JSON.parse(raw));
+  } catch(e){ useHash = true; }
+
+  if (fromLink){
+    var busy = saved && saved.games && saved.games.some(function(g){
+      return g.q[0].concat(g.q[1]).some(function(v){ return v !== null && v !== undefined; });
+    });
+    if (!busy || confirm('링크에 담긴 기록을 불러올까요?\n지금 저장된 기록은 덮어써집니다.')){
+      if (!useHash) cleanUrl();
+      return migrate(fromLink);
     }
-  } catch(e) {}
+  }
+  if (saved) { if (!useHash) cleanUrl(); return saved; }
+  if (!useHash) cleanUrl();
   return defaultState();
 }
 /* 이전 버전(팀=문자열 배열) 호환 */
@@ -700,6 +781,7 @@ function ovlCopy(){
   else { toast('글자를 길게 눌러 "복사"를 선택하세요'); }
 }
 function copyTxt(){ doCopy(shareText(), '📋 복사 완료! 카톡에 붙여넣기 하세요'); }
+function copyLink(){ doCopy(shareUrl(), '🔗 기록 링크를 복사했어요'); }
 function shareKakao(){
   var t = shareText();
   if (navigator.share){
